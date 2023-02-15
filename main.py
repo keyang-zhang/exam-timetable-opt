@@ -191,13 +191,13 @@ class Optimizer:
     def output_time_table(self, overall=True, student_specific=False):
 
         if overall:
-            with open("./Exam_timetable.csv", "w", newline="") as f:
+            with open("data/Exam_timetable.csv", "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["Course", "Exam Date"])
                 writer.writerows([[exam, date] for exam, date in self.exam_date_table.items()])
 
         if student_specific:
-            with open("./Student-specific_exam_timetable.csv", "w", newline="") as f:
+            with open("data/Student-specific_exam_timetable.csv", "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["Student ID", "Exams and Dates",
                                  "Having 2 Consecutive Exams", "Having 3 Consecutive Exams",
