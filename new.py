@@ -3,8 +3,8 @@ import random
 from itertools import combinations
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
-from prettytable import PrettyTable
 
 from deap import algorithms
 from deap import base
@@ -17,8 +17,10 @@ KPI_CONSEC_1 = "2 consecutive exams in a week"
 KPI_CONSEC_2 = "3 consecutive exams in a week"
 KPI_OVERLOAD_1 = "more than 1 exam in a day"
 KPI_OVERLOAD_2 = "more than 3 exams in a week"
+KPI_OVERLOAD_3 = "4 exams in a week"
+KPI_OVERLOAD_4 = "5 exams in a week"
 KPI_EXAM_DURA = "duration of the exam period"
-KPI_SET = (KPI_CONSEC_1, KPI_CONSEC_2, KPI_OVERLOAD_1, KPI_OVERLOAD_2, KPI_EXAM_DURA)
+KPI_SET = (KPI_CONSEC_1, KPI_CONSEC_2, KPI_OVERLOAD_1, KPI_OVERLOAD_2, KPI_EXAM_DURA, KPI_OVERLOAD_3, KPI_OVERLOAD_4)
 
 
 class GAOptimizer:
@@ -40,19 +42,34 @@ class GAOptimizer:
         self.ga_log = None
         self.exam2spats = None  # optimised and complete exam timetable
 
-    def initialize(self, available_spatio_timeslots, week2date_dict, fixed_exams, room_caps, regis_datafile=None,
-                   id_column=None):
-        self.available_spatio_timeslots = available_spatio_timeslots
-        self.week2date_dict = week2date_dict
+    def initialize(self, spatime_file, rooms, room_caps, fixed_exams, regis_datafile,
+                   id_col="ID", day_col="day", week_col="week", slot_col="slot"):
         self.fixed_exams = fixed_exams
         self.room_caps = room_caps
 
-        if regis_datafile is not None:
-            self.process_register_data(regis_datafile, id_column)
+        self.process_spatio_time_data(spatime_file, rooms, day_col, week_col, slot_col)
+        self.process_register_data(regis_datafile, id_col)
+        self.check_conflict()
 
-        if self.exam2students is not None:
-            self.check_conflict()
-            # self.generate_bindings()
+    def process_spatio_time_data(self, spatime_file, rooms, day_col="day", week_col="week", slot_col="slot"):
+        spatime_table = pd.read_csv(spatime_file)
+        week2date_dict = {}
+        available_spatio_timeslots = []
+        for _, row in spatime_table.iterrows():
+            day = row[day_col]
+            week = row[week_col]
+            for room in rooms:
+                if pd.isna(row[room]):
+                    available_spatio_timeslots.append((day, row[slot_col], room))
+            if week2date_dict.get(week) is None:
+                week2date_dict[week] = []
+            else:
+                if day not in week2date_dict[week]:
+                    week2date_dict[week].append(day)
+
+        self.week2date_dict = week2date_dict
+        self.available_spatio_timeslots = available_spatio_timeslots
+        self.ts_table = spatime_table
 
     def process_register_data(self, regis_datafile, id_column="ID"):
         student_regis_table = pd.read_csv(regis_datafile, index_col=id_column)
@@ -110,7 +127,7 @@ class GAOptimizer:
 
     def optimize(self, kpi_coef, pop_size=100, crossover_rate=0, mutation_rate=0.5, num_generation=200):
 
-        free_exams = list(set(self.exam2students.keys()) - set(self.fixed_exams) - set(self.bindings.keys()))
+        free_exams = list(set(self.exam2students.keys()) - set(self.fixed_exams.keys()) - set(self.bindings.keys()))
         if len(free_exams) > len(self.available_spatio_timeslots):
             raise ValueError("the number of exams exceeds the number of available spaces")
         else:
@@ -135,7 +152,7 @@ class GAOptimizer:
                          week2date_dict=self.week2date_dict,
                          kpi_coef=kpi_coef,
                          room_caps=self.room_caps,
-                         conflict_exam_pairs=self.conflict_exams_pairs)
+                         conflict_exams_pairs=self.conflict_exams_pairs)
         toolbox.register("mate", tools.cxPartialyMatched)
         toolbox.register("mutate", tools.mutShuffleIndexes, indpb=0.1)
         toolbox.register("select", tools.selTournament, tournsize=5)
@@ -161,12 +178,44 @@ class GAOptimizer:
         return exam2spats
 
     def get_kpis(self):
-        return self.calculate_kpis(self.exam2spats,self.student2exams,self.week2date_dict)
+        return self.calculate_kpis(self.exam2spats, self.student2exams, self.week2date_dict)
+
+    def get_feasibility(self):
+        feasible = True
+        cap_feasible = True
+        time_feasible = True
+        # check feasibility - capacity
+        for exam, spats in self.exam2spats.items():
+            if exam not in self.fixed_exams:
+                stu_n = len(self.exam2students[exam])
+                cap = room_caps[spats[2]]
+                if stu_n > cap:
+                    feasible = False
+                    cap_feasible = False
+                    print(
+                        f"exam {exam} is arrange to {spats} but capacity is not enough. student: {stu_n} while capacity: {cap}")
+
+        # check feasibility - conflict exams
+        for e1, e2 in self.conflict_exams_pairs:
+            spats1, spats2 = self.exam2spats[e1], self.exam2spats[e2]
+            if spats1[0] == spats2[0] and spats1[1] == spats2[1]:
+                feasible = False
+                time_feasible = False
+                print(f"{e1} and {e2} are arranged on the same day and slot, but they are conflicting")
+        return feasible, cap_feasible, time_feasible
+
+    def output_table(self, path="./data/optimized_table.csv"):
+        table = self.ts_table.fillna("")
+        table = table.astype(str)
+        for exam, spats in self.exam2spats.items():
+            row_idx = table.query(f'day == "{spats[0]}" & slot == "{spats[1]}"').index[0]
+            table.at[row_idx, spats[2]] = exam
+        table.to_csv(path, index=False)
 
     @staticmethod
     def evaluate(individual, fixed_exams: dict, bindings: dict, available_spatio_timeslots: list,
                  student2exams: dict, exam2students: dict, week2date_dict: dict, kpi_coef: dict,
-                 room_caps: dict, conflict_exam_pairs):
+                 room_caps: dict, conflict_exams_pairs):
         # combine three types of exams to get complete exam timetable
         exam2spats = GAOptimizer.gen_full_table(available_spatio_timeslots, individual, fixed_exams, bindings)
 
@@ -175,29 +224,21 @@ class GAOptimizer:
         # calculate the weighted fitness
         fitness = sum(kpi_coef[kpi] * kpi_value[kpi] for kpi in KPI_SET)
 
-        feasible = GAOptimizer.check_feasibility(exam2spats, conflict_exam_pairs, exam2students, fixed_exams, room_caps)
-
-        if not feasible:
-            fitness -= INF
-
-        return fitness,
-
-    @staticmethod
-    def check_feasibility(exam2spats, conflict_exam_pairs, exam2students, fixed_exams, room_caps):
-        feasible = True
-        # check feasibility - capacity
+        # penalize capacity feasibility violation
         for exam, spats in exam2spats.items():
             if exam not in fixed_exams:
                 stu_n = len(exam2students[exam])
                 cap = room_caps[spats[2]]
                 if stu_n > cap:
-                    feasible = False
-        # check feasibility - conflict exams
-        for e1, e2 in conflict_exam_pairs:
+                    fitness -= INF
+
+        # penalize conflicting-exam feasibility violation
+        for e1, e2 in conflict_exams_pairs:
             spats1, spats2 = exam2spats[e1], exam2spats[e2]
             if spats1[0] == spats2[0] and spats1[1] == spats2[1]:
-                feasible = False
-        return feasible
+                fitness -= INF
+
+        return fitness,
 
     @staticmethod
     def calculate_kpis(exam2spats, student2exams, week2date_dict):
@@ -227,6 +268,10 @@ class GAOptimizer:
             for week in week2date_dict:
                 if len(student_exam_dates_set.intersection(set(week2date_dict[week]))) > 3:
                     kpi_value[KPI_OVERLOAD_2] += 1
+                if len(student_exam_dates_set.intersection(set(week2date_dict[week]))) == 4:
+                    kpi_value[KPI_OVERLOAD_3] += 1
+                if len(student_exam_dates_set.intersection(set(week2date_dict[week]))) == 5:
+                    kpi_value[KPI_OVERLOAD_4] += 1
         # calculate kpi value - the duration of the exam period (captured by the day of last exams
         last_exam_date = 0
         for spats in exam2spats.values():
@@ -250,33 +295,22 @@ if __name__ == "__main__":
     rooms = ("R060", "R064", "R301", "R307", "R315")
     room_caps = {"R060": 84, "R064": 63, "R301": 68, "R307": 63, "R315": 28}
     fixed_exams = {"CIVE97122": (5, "am", "R315")}
-    kpi_coef = {KPI_CONSEC_1: -1,
-                KPI_CONSEC_2: -5,
-                KPI_OVERLOAD_1: -100,
-                KPI_OVERLOAD_2: -100,
-                KPI_EXAM_DURA: -10}
+    kpi_coef = {KPI_CONSEC_1: -0,
+                KPI_CONSEC_2: -0,
+                KPI_OVERLOAD_1: -0,
+                KPI_OVERLOAD_2: -0,
+                KPI_OVERLOAD_3: 0,
+                KPI_OVERLOAD_4: 0,
+                KPI_EXAM_DURA: -200}
     regis_file = "./data/exam_registration.csv"
     timespace_file = "./data/exam_timetable_2023.csv"
-    ts_data = pd.read_csv(timespace_file)
-
-    week2date_dict = {}
-    available_spatio_timeslots = []
-    for _, row in ts_data.iterrows():
-        day = row["day"]
-        week = row["week"]
-        for room in rooms:
-            if pd.isna(row[room]):
-                available_spatio_timeslots.append((day, row["slot"], room))
-        if week2date_dict.get(week) is None:
-            week2date_dict[week] = []
-        else:
-            if day not in week2date_dict[week]:
-                week2date_dict[week].append(day)
-
     # optimize
     exam_opt = GAOptimizer()
-    exam_opt.initialize(available_spatio_timeslots, week2date_dict, fixed_exams, room_caps, regis_file, "CID")
-    exam_opt.optimize(kpi_coef, pop_size=100, mutation_rate=0.3, num_generation=500)
+    exam_opt.initialize(timespace_file, rooms, room_caps, fixed_exams, regis_file, "CID")
+    exam_opt.optimize(kpi_coef, pop_size=100, mutation_rate=0.4, num_generation=800)
+    print(exam_opt.get_feasibility())
+    print(exam_opt.get_kpis())
+    exam_opt.output_table()
 
     # # print results to console
     # exam_opt.print_result(exam_table=True, student_statistic=True)
